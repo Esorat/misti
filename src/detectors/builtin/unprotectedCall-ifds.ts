@@ -28,19 +28,19 @@ const SEND_FUNCTIONS = ["send"];
 // Known mutation methods that modify state in Tact (versions < 1.6)
 const MUTATION_METHODS = new Set([
   // Slice mutation methods (available before Tact 1.6)
-  "loadRef",        // Loads the next reference from a Slice as a Cell
-  "loadBit",        // Loads a single bit from a Slice as a Bool (since Tact 1.5.0)
-  "loadCoins",      // Loads an unsigned Int (0 to 2^120 - 1) from a Slice
-  "loadBits",       // Loads a specified number of bits from a Slice as a new Slice
-  "loadInt",        // Loads a signed Int of specified bits from a Slice
-  "loadUint",       // Loads an unsigned Int of specified bits from a Slice
-  
+  "loadRef", // Loads the next reference from a Slice as a Cell
+  "loadBit", // Loads a single bit from a Slice as a Bool (since Tact 1.5.0)
+  "loadCoins", // Loads an unsigned Int (0 to 2^120 - 1) from a Slice
+  "loadBits", // Loads a specified number of bits from a Slice as a new Slice
+  "loadInt", // Loads a signed Int of specified bits from a Slice
+  "loadUint", // Loads an unsigned Int of specified bits from a Slice
+
   // Additional mutation methods for other types or contexts
-  "set",            // Likely modifies a map or contract state by setting a value
-  "del",            // Likely deletes an entry from a map or contract state
-  "add",            // Likely adds an element to a map or data structure
-  "remove",         // Likely removes an element from a map or data structure
-  "Slice",          // Possibly a constructor or method related to Slice modification
+  "set", // Likely modifies a map or contract state by setting a value
+  "del", // Likely deletes an entry from a map or contract state
+  "add", // Likely adds an element to a map or data structure
+  "remove", // Likely removes an element from a map or data structure
+  "Slice", // Possibly a constructor or method related to Slice modification
 ]);
 
 // Safe addresses and functions that don't need protection
@@ -222,7 +222,7 @@ export class UnprotectedCallIFDS extends DataflowDetector {
    */
   private checkForUnprotectedCalls(
     stmt: AstStatement,
-    facts: Set<DataflowFact>,
+    blockFacts: Set<DataflowFact>,
     warnings: MistiTactWarning[],
   ): void {
     // Only process expression statements
@@ -230,8 +230,38 @@ export class UnprotectedCallIFDS extends DataflowDetector {
 
     const expr = stmt.expression;
 
-    // Look for taint sink facts that match this expression
-    const sinkFacts = Array.from(facts).filter(
+    // Check for map mutations
+    if (expr.kind === "method_call" && expr.method) {
+      const methodName = idText(expr.method);
+
+      // Handle all mutation methods
+      if (
+        MUTATION_METHODS.has(methodName) &&
+        expr.self &&
+        expr.self.kind === "field_access"
+      ) {
+        this.checkMapMutation(expr, warnings, blockFacts);
+        return;
+      }
+    }
+
+    // Check for send calls
+    if (expr.kind === "static_call" && expr.function) {
+      const fnName = idText(expr.function);
+
+      // Handle send function
+      if (
+        SEND_FUNCTIONS.includes(fnName) &&
+        expr.args &&
+        expr.args.length > 0
+      ) {
+        this.checkSendCall(expr, warnings, blockFacts);
+        return;
+      }
+    }
+
+    // Also check for taint sinks in general
+    const sinkFacts = Array.from(blockFacts).filter(
       (fact) =>
         fact.node === expr.id &&
         (fact.id.includes(":taint-sink:send") ||
@@ -239,104 +269,12 @@ export class UnprotectedCallIFDS extends DataflowDetector {
     );
 
     if (sinkFacts.length > 0) {
-      // Check what type of sink this is
-      const isSendSink = sinkFacts.some((fact) =>
-        fact.id.includes(":taint-sink:send"),
+      warnings.push(
+        this.makeWarning(
+          `Unprotected operation with tainted values: ${prettyPrint(expr)}`,
+          expr.loc,
+        ),
       );
-      const isMutationSink = sinkFacts.some((fact) =>
-        fact.id.includes(":taint-sink:mutation"),
-      );
-
-      // For send calls
-      if (isSendSink && expr.kind === "static_call" && expr.function) {
-        const fnName = idText(expr.function);
-
-        if (
-          SEND_FUNCTIONS.includes(fnName) &&
-          expr.args &&
-          expr.args.length > 0
-        ) {
-          // Check if this is already protected by safe addresses
-          const sendParamsArg = expr.args[0];
-          if (sendParamsArg) {
-            const sendParamsText = prettyPrint(sendParamsArg);
-            if (SAFE_ADDRESSES.some((addr) => sendParamsText.includes(addr))) {
-              return; // Safe address, no warning needed
-            }
-
-            warnings.push(
-              this.makeWarning(
-                `Unprotected send with potentially unsafe arguments: ${prettyPrint(sendParamsArg)}`,
-                sendParamsArg.loc,
-              ),
-            );
-          }
-        }
-      }
-
-      // For map mutations
-      if (isMutationSink && expr.kind === "method_call" && expr.method) {
-        const methodName = idText(expr.method);
-
-        if (
-          MUTATION_METHODS.has(methodName) &&
-          expr.self &&
-          expr.self.kind === "field_access"
-        ) {
-          // Check if this is already protected by safe addresses
-          if (expr.args && expr.args.length > 0) {
-            const argsText = expr.args
-              .map((arg) => prettyPrint(arg))
-              .join(", ");
-
-            // Check if all arguments are safe constants or self-references
-            if (
-              SAFE_ADDRESSES.some((addr) => argsText.includes(addr)) ||
-              argsText.match(/^\d+$/) || // Pure number literals
-              !argsText.includes(".")
-            ) {
-              // Not accessing any property
-              return; // Safe arguments, no warning needed
-            }
-          }
-
-          warnings.push(
-            this.makeWarning(
-              `Unprotected field mutation: ${prettyPrint(expr)}`,
-              expr.loc,
-            ),
-          );
-        }
-      }
-    } else {
-      // Fallback to the older implementation for cases where taint analysis didn't catch it
-      // Check for send calls
-      if (expr.kind === "static_call" && expr.function) {
-        const fnName = idText(expr.function);
-
-        // Handle send function
-        if (
-          SEND_FUNCTIONS.includes(fnName) &&
-          expr.args &&
-          expr.args.length > 0
-        ) {
-          this.checkSendCall(expr, warnings);
-        }
-      }
-
-      // Check for map mutations
-      else if (expr.kind === "method_call" && expr.method) {
-        const methodName = idText(expr.method);
-
-        // Handle mutation methods
-        if (
-          MUTATION_METHODS.has(methodName) &&
-          expr.self &&
-          expr.self.kind === "field_access"
-        ) {
-          this.checkMapMutation(expr, warnings);
-        }
-      }
     }
   }
 
@@ -401,12 +339,18 @@ export class UnprotectedCallIFDS extends DataflowDetector {
   private checkSendCall(
     call: AstExpression & { function?: AstNode; args?: AstExpression[] },
     warnings: MistiTactWarning[],
+    facts: Set<DataflowFact>,
   ): void {
     // Get the first argument (SendParameters)
     const sendParamsArg = call.args?.[0];
     if (!sendParamsArg || sendParamsArg.kind !== "struct_instance") {
       return;
     }
+
+    // Check if any args are tainted based on facts
+    const isTainted = Array.from(facts).some(
+      (fact) => sendParamsArg.id === fact.node && fact.id.includes(":taint:"),
+    );
 
     // Check for safe addresses in the SendParameters
     const sendParamsText = prettyPrint(sendParamsArg);
@@ -416,7 +360,7 @@ export class UnprotectedCallIFDS extends DataflowDetector {
 
     warnings.push(
       this.makeWarning(
-        `Unprotected send with potentially unsafe arguments: ${prettyPrint(sendParamsArg)}`,
+        `Unprotected send with potentially unsafe arguments${isTainted ? " (tainted)" : ""}: ${prettyPrint(sendParamsArg)}`,
         sendParamsArg.loc,
       ),
     );
@@ -428,27 +372,36 @@ export class UnprotectedCallIFDS extends DataflowDetector {
   private checkMapMutation(
     call: AstExpression & { method?: AstNode; args?: AstExpression[] },
     warnings: MistiTactWarning[],
+    facts: Set<DataflowFact>,
   ): void {
-    // Check if this is using only safe constants or self-references
-    if (call.args && call.args.length > 0) {
-      const argsText = call.args.map((arg) => prettyPrint(arg)).join(", ");
+    if (!call.args || call.args.length === 0) return;
 
-      // Check if all arguments are safe
-      if (
-        SAFE_ADDRESSES.some((addr) => argsText.includes(addr)) ||
-        argsText.match(/^\d+$/) || // Pure number literals
-        !argsText.includes(".")
-      ) {
-        // Not accessing any property
-        return; // Safe arguments, no warning needed
-      }
+    // Check if any of the arguments are tainted
+    const isTainted = call.args.some((arg) => {
+      // Check if this specific argument has a taint fact
+      return Array.from(facts).some(
+        (fact) => fact.node === arg.id && fact.id.includes(":taint:"),
+      );
+    });
+
+    // Check for known safe constants like numeric literals or safe addresses
+    const isExplicitlySafe = call.args.every((arg) => {
+      // Check for numeric literals - compare the kind string directly
+      if (arg.kind === "number") return true;
+
+      // Check for safe addresses
+      const argText = prettyPrint(arg);
+      return SAFE_ADDRESSES.some((addr) => argText === addr);
+    });
+
+    // If tainted or not explicitly safe, generate a warning
+    if (isTainted || !isExplicitlySafe) {
+      warnings.push(
+        this.makeWarning(
+          `Unprotected field mutation${isTainted ? " with tainted values" : ""}: ${prettyPrint(call)}`,
+          call.loc,
+        ),
+      );
     }
-
-    warnings.push(
-      this.makeWarning(
-        `Unprotected field mutation: ${prettyPrint(call)}`,
-        call.loc,
-      ),
-    );
   }
 }

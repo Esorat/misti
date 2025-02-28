@@ -45,12 +45,10 @@ export class IFDSLattice implements JoinSemilattice<Set<DataflowFact>> {
             existingFact.context,
             bFact.context,
           );
-
           // If contexts are different, update the existing fact
           if (!this.contextsEqual(existingFact.context, mergedContext)) {
             // Remove the existing fact
             result.delete(existingFact);
-
             // Add a new fact with the merged context
             result.add({
               ...existingFact,
@@ -63,7 +61,6 @@ export class IFDSLattice implements JoinSemilattice<Set<DataflowFact>> {
         result.add(bFact);
       }
     }
-
     return result;
   }
 
@@ -72,7 +69,6 @@ export class IFDSLattice implements JoinSemilattice<Set<DataflowFact>> {
    */
   leq(a: Set<DataflowFact>, b: Set<DataflowFact>): boolean {
     if (a.size > b.size) return false;
-
     // Check if every fact in a has a matching fact in b
     for (const aFact of a) {
       const matchingFact = this.findMatchingFact(b, aFact);
@@ -80,7 +76,6 @@ export class IFDSLattice implements JoinSemilattice<Set<DataflowFact>> {
       if (!matchingFact) {
         return false; // Fact in a not found in b
       }
-
       // If path contexts exist, check if a's context is more restrictive than b's
       if (aFact.context && matchingFact.context) {
         if (!this.contextIsSubsetOf(aFact.context, matchingFact.context)) {
@@ -91,7 +86,6 @@ export class IFDSLattice implements JoinSemilattice<Set<DataflowFact>> {
         return false;
       }
     }
-
     return true;
   }
 
@@ -139,7 +133,6 @@ export class IFDSLattice implements JoinSemilattice<Set<DataflowFact>> {
         result.set(condId, value);
       }
     }
-
     return { conditions: result };
   }
 

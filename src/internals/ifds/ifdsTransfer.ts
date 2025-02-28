@@ -13,6 +13,34 @@ import {
 } from "@tact-lang/compiler/dist/grammar/ast";
 import { prettyPrint } from "@tact-lang/compiler/dist/prettyPrinter";
 
+// Define proper interfaces for different statement types
+interface AstStatementLet extends Omit<AstStatement, "kind"> {
+  kind: "statement_let";
+  name: AstNode;
+  expression: AstExpression;
+}
+
+interface AstStatementAssign extends Omit<AstStatement, "kind"> {
+  kind: "statement_assign";
+  path: AstNode;
+  expression: AstExpression;
+}
+
+interface AstStatementAugAssign extends Omit<AstStatement, "kind"> {
+  kind: "statement_augmentedassign";
+  path: AstNode;
+  expression: AstExpression;
+}
+
+// Interface for function definitions
+interface AstFunctionDef {
+  id: number;
+  kind: "function_def";
+  name?: AstNode & { kind: "id"; id: number };
+  args?: Array<{ name?: AstNode & { id: number } }>;
+  receiver?: { type?: AstNode };
+}
+
 /**
  * Transfer function for IFDS analysis.
  *
@@ -101,7 +129,7 @@ export class IFDSTransfer implements Transfer<Set<DataflowFact>> {
     if (funcAst) {
       // Taint function parameters for receive methods
       // Use type assertion to handle different AST function types
-      const funcDef = funcAst as any;
+      const funcDef = funcAst as AstFunctionDef;
       if (
         funcDef.kind === "function_def" &&
         funcDef.name &&
@@ -129,7 +157,7 @@ export class IFDSTransfer implements Transfer<Set<DataflowFact>> {
       const contractFields: AstNode[] = [];
       try {
         // Use type assertion to access receiver property
-        const funcWithReceiver = funcAst as any;
+        const funcWithReceiver = funcAst as AstFunctionDef;
         if (funcWithReceiver.receiver && funcWithReceiver.receiver.type) {
           // Get the contract fields from the AST
           const contracts = Array.from(this.cu.ast.getContracts?.() || []);
@@ -159,6 +187,100 @@ export class IFDSTransfer implements Transfer<Set<DataflowFact>> {
         // Silently ignore errors during field extraction
       }
     }
+
+    // Add explicit handling for slice operations in the function body
+    if (funcAst) {
+      // Iterate through statements to find slice loading operations
+      cfg.forEachBasicBlock(this.cu.ast, (stmt: AstStatement) => {
+        // Handle different statement types with proper type checking
+        if (stmt.kind === "statement_let") {
+          const letStmt = stmt as any;
+          if (
+            letStmt.expression &&
+            letStmt.expression.kind === "method_call" &&
+            letStmt.expression.method &&
+            letStmt.expression.self
+          ) {
+            const methodName = idText(letStmt.expression.method);
+
+            // Check if it's a slice loading method
+            if (
+              [
+                "loadAddress",
+                "loadInt",
+                "loadUint",
+                "loadBits",
+                "loadRef",
+                "loadSlice",
+              ].includes(methodName)
+            ) {
+              // Check if the slice itself is tainted
+              const selfId = letStmt.expression.self.id;
+              const isSelfTainted = Array.from(outState).some(
+                (fact) => fact.node === selfId && fact.id.includes(":taint:"),
+              );
+              // If slice is tainted, the loaded value should be tainted too
+              if (isSelfTainted && letStmt.name && letStmt.name.kind === "id") {
+                const loadedVarTaintFact: DataflowFact = {
+                  id: `${letStmt.name.id}:taint:slice-loaded`,
+                  node: letStmt.name.id,
+                  context: undefined,
+                };
+                outState.add(loadedVarTaintFact);
+              }
+            }
+          }
+        } else if (stmt.kind === "statement_assign") {
+          const assignStmt = stmt as any;
+          if (
+            assignStmt.expression &&
+            assignStmt.expression.kind === "method_call" &&
+            assignStmt.expression.method &&
+            assignStmt.expression.self
+          ) {
+            const methodName = idText(assignStmt.expression.method);
+
+            if (
+              [
+                "loadAddress",
+                "loadInt",
+                "loadUint",
+                "loadBits",
+                "loadRef",
+                "loadSlice",
+              ].includes(methodName)
+            ) {
+              const selfId = assignStmt.expression.self.id;
+              const isSelfTainted = Array.from(outState).some(
+                (fact) => fact.node === selfId && fact.id.includes(":taint:"),
+              );
+              if (
+                isSelfTainted &&
+                assignStmt.path &&
+                assignStmt.path.kind === "id"
+              ) {
+                const loadedVarTaintFact: DataflowFact = {
+                  id: `${assignStmt.path.id}:taint:slice-loaded`,
+                  node: assignStmt.path.id,
+                  context: undefined,
+                };
+                outState.add(loadedVarTaintFact);
+              }
+            }
+          }
+        }
+      });
+    }
+  }
+
+  /**
+   * Helper method to get facts related to a specific AST node.
+   */
+  private getFactsForNode(
+    facts: Set<DataflowFact>,
+    nodeId: number,
+  ): Set<DataflowFact> {
+    return new Set(Array.from(facts).filter((fact) => fact.node === nodeId));
   }
 
   /**
@@ -369,14 +491,17 @@ export class IFDSTransfer implements Transfer<Set<DataflowFact>> {
     let rhs: AstExpression | undefined;
 
     if (stmt.kind === "statement_let") {
-      lhs = (stmt as any).name;
-      rhs = (stmt as any).expression;
+      const letStmt = stmt as AstStatementLet;
+      lhs = letStmt.name;
+      rhs = letStmt.expression;
     } else if (stmt.kind === "statement_assign") {
-      lhs = (stmt as any).path;
-      rhs = (stmt as any).expression;
+      const assignStmt = stmt as AstStatementAssign;
+      lhs = assignStmt.path;
+      rhs = assignStmt.expression;
     } else if (stmt.kind === "statement_augmentedassign") {
-      lhs = (stmt as any).path;
-      rhs = (stmt as any).expression;
+      const augAssignStmt = stmt as AstStatementAugAssign;
+      lhs = augAssignStmt.path;
+      rhs = augAssignStmt.expression;
     }
 
     if (!lhs || !rhs) return;
@@ -400,33 +525,45 @@ export class IFDSTransfer implements Transfer<Set<DataflowFact>> {
       // Add taint for struct fields
     } else if (rhs.kind === "method_call") {
       // Handle method calls
-      this.handleMethodCall(
+      this.handleMethodCallInAssignment(
         outState,
         rhs as AstExpression & { method?: AstNode },
         lhs,
       );
+    }
+    // Add special handling for slice loading operations
+    if (stmt.kind === "statement_let") {
+      const letStmt = stmt as AstStatementLet;
+      if (letStmt.expression && letStmt.expression.kind === "method_call") {
+        this.handleSliceLoadingLet(outState, letStmt);
+      }
+    } else if (stmt.kind === "statement_assign") {
+      const assignStmt = stmt as AstStatementAssign;
+      if (
+        assignStmt.expression &&
+        assignStmt.expression.kind === "method_call"
+      ) {
+        this.handleSliceLoadingAssign(outState, assignStmt);
+      }
     }
   }
 
   /**
    * Handles method calls in assignments.
    */
-  private handleMethodCall(
+  private handleMethodCallInAssignment(
     outState: Set<DataflowFact>,
     call: AstExpression & { method?: AstNode },
     lhs: AstNode,
   ): void {
     if (!call.method) return;
-
     // Find callee function/method
     const calleeCfg = this.findCalleeCfg(call);
-
     if (calleeCfg) {
       // Use summary edges if available
       const calleeKey = `${calleeCfg.id}`;
       if (this.summaryEdges.has(calleeKey)) {
         const summaries = this.summaryEdges.get(calleeKey)!;
-
         // Apply summary edges
         for (const fact of outState) {
           const summaryResults = summaries.get(fact);
@@ -443,7 +580,6 @@ export class IFDSTransfer implements Transfer<Set<DataflowFact>> {
           node: lhs.id,
           context: undefined, // Reset path context as we don't have precise call info
         };
-
         outState.add(newFact);
       }
     }
@@ -458,7 +594,6 @@ export class IFDSTransfer implements Transfer<Set<DataflowFact>> {
     bb: BasicBlock,
   ): void {
     if (!stmt.expression) return;
-
     // Find facts for the return expression
     const returnFacts = this.getFactsForNode(outState, stmt.expression.id);
 
@@ -496,222 +631,10 @@ export class IFDSTransfer implements Transfer<Set<DataflowFact>> {
     stmt: AstStatement & { expression: AstExpression },
   ): void {
     const expr = stmt.expression;
-
+    // Handle method calls
     if (expr.kind === "method_call") {
-      // Handle method calls that could propagate taint
-      this.handleMethodCallExpression(
-        outState,
-        expr as AstExpression & {
-          method?: AstNode;
-          args?: AstExpression[];
-          self?: AstExpression;
-        },
-      );
-    } else if (expr.kind === "static_call") {
-      // Handle static calls
+      this.handleMethodCallInExpression(outState, expr);
     }
-  }
-
-  /**
-   * Handles method call expressions with enhanced taint tracking.
-   */
-  private handleMethodCallExpression(
-    outState: Set<DataflowFact>,
-    call: AstExpression & {
-      method?: AstNode;
-      args?: AstExpression[];
-      self?: AstExpression;
-    },
-  ): void {
-    if (!call.method) return;
-
-    // Skip taint propagation in method calls if pathSensitive is disabled
-    if (!this.pathSensitive) {
-      return;
-    }
-
-    // Track taint for security-sensitive methods
-    // Safely get method name, verifying it's an id
-    let methodName = "";
-    if (call.method.kind === "id") {
-      methodName = idText(call.method);
-    } else {
-      return; // Not a simple method we can analyze
-    }
-
-    // Handle interprocedural analysis with the call graph
-    const calleeCfg = this.findCalleeCfg(call);
-    if (calleeCfg) {
-      // Propagate taint through the call if we have tainted arguments
-      let _hasTaintedArgs = false; // Prefix with underscore to indicate deliberate unused variable
-      if (call.args) {
-        for (const arg of call.args) {
-          const argFacts = this.getFactsForNode(outState, arg.id);
-          if (argFacts.size > 0) {
-            _hasTaintedArgs = true;
-            // A full interprocedural analysis would map arguments to parameters here
-            // For now, we'll mark the call as tainted
-            const callTaintFact: DataflowFact = {
-              id: `${call.id}:taint:call-with-tainted-args`,
-              node: call.id,
-              context: argFacts.values().next().value?.context,
-            };
-            outState.add(callTaintFact);
-          }
-        }
-      }
-
-      // For self references which may be fields, mark those as possibly tainted too
-      if (call.self && call.self.kind === "field_access") {
-        const selfFacts = this.getFactsForNode(outState, call.self.id);
-        if (selfFacts.size > 0) {
-          _hasTaintedArgs = true;
-          // Mark the call itself as tainted
-          const selfTaintFact: DataflowFact = {
-            id: `${call.id}:taint:call-with-tainted-self`,
-            node: call.id,
-            context: selfFacts.values().next().value?.context,
-          };
-          outState.add(selfTaintFact);
-        }
-      }
-    }
-
-    // Handle send() calls - these are security-sensitive operations
-    if (methodName === "send" && call.args && call.args.length > 0) {
-      // The first argument to send is typically SendParameters, which may contain tainted data
-      const sendParams = call.args[0];
-      if (sendParams) {
-        // Check if the sendParams or any of its fields are tainted
-        const sendParamFacts = this.getFactsForNode(outState, sendParams.id);
-
-        if (sendParamFacts.size > 0) {
-          // Mark this send call as a taint sink with a special fact
-          const sinkFact: DataflowFact = {
-            id: `${call.id}:taint-sink:send`,
-            node: call.id,
-            // Preserve context to track if this occurs in a protected context
-            context: sendParamFacts.values().next().value?.context,
-          };
-
-          outState.add(sinkFact);
-        }
-
-        // Also check fields like 'to', 'value', 'body', etc. if it's a struct instance
-        if (sendParams.kind === "struct_instance") {
-          this.checkStructFieldsForTaint(
-            outState,
-            sendParams as any,
-            call.id,
-            "send",
-          );
-        }
-      }
-    }
-
-    // Handle map mutations (set, del, etc.) - these can expose sensitive state
-    if (
-      ["set", "del", "add", "remove"].includes(methodName) &&
-      call.self &&
-      call.args &&
-      call.args.length > 0
-    ) {
-      // Check if the container (self) is a sensitive container (mapping, etc.)
-      const containerFacts = this.getFactsForNode(outState, call.self.id);
-      const isSensitiveContainer =
-        containerFacts.size > 0 || call.self.kind === "field_access"; // field accesses are sensitive
-
-      // Check if any arguments are tainted
-      const argFacts: Set<DataflowFact> = new Set();
-      for (const arg of call.args) {
-        const facts = this.getFactsForNode(outState, arg.id);
-        for (const fact of facts) {
-          argFacts.add(fact);
-        }
-      }
-
-      // If we have sensitive container or tainted args, mark as sink
-      if (isSensitiveContainer || argFacts.size > 0) {
-        // Create a taint sink fact for this mutation
-        const sinkFact: DataflowFact = {
-          id: `${call.id}:taint-sink:mutation`,
-          node: call.id,
-          // Preserve context (if any) from arg or container
-          context:
-            argFacts.size > 0
-              ? argFacts.values().next().value?.context
-              : containerFacts.values().next().value?.context,
-        };
-
-        outState.add(sinkFact);
-      }
-    }
-  }
-
-  /**
-   * Checks fields of a struct instance for taint and creates sink facts if needed.
-   */
-  private checkStructFieldsForTaint(
-    outState: Set<DataflowFact>,
-    struct: AstExpression & {
-      fields?: Array<{ name: AstNode; value: AstExpression }>;
-    },
-    callId: AstNode["id"],
-    sinkType: string,
-  ): void {
-    if (!struct.fields) return;
-
-    for (const field of struct.fields) {
-      if (!field.value) continue;
-
-      const fieldFacts = this.getFactsForNode(outState, field.value.id);
-      if (fieldFacts.size > 0) {
-        // Create a taint sink fact for this field
-        const fieldName =
-          field.name.kind === "id"
-            ? idText(field.name)
-            : `field_${field.name.id}`;
-        const sinkFact: DataflowFact = {
-          id: `${callId}:taint-sink:${sinkType}:${fieldName}`,
-          node: callId,
-          context: fieldFacts.values().next().value?.context,
-        };
-
-        outState.add(sinkFact);
-      }
-
-      // Recursively check nested structs
-      if (field.value.kind === "struct_instance") {
-        const fieldName =
-          field.name.kind === "id"
-            ? idText(field.name)
-            : `field_${field.name.id}`;
-        this.checkStructFieldsForTaint(
-          outState,
-          field.value as any,
-          callId,
-          `${sinkType}:${fieldName}`,
-        );
-      }
-    }
-  }
-
-  /**
-   * Gets all facts related to a specific AST node.
-   */
-  private getFactsForNode(
-    facts: Set<DataflowFact>,
-    nodeId: AstNode["id"],
-  ): Set<DataflowFact> {
-    const result = new Set<DataflowFact>();
-
-    for (const fact of facts) {
-      if (fact.node === nodeId) {
-        result.add(fact);
-      }
-    }
-
-    return result;
   }
 
   /**
@@ -775,7 +698,7 @@ export class IFDSTransfer implements Transfer<Set<DataflowFact>> {
 
         if (func) {
           // Use type assertion to handle different function types
-          const funcWithName = func as any;
+          const funcWithName = func as AstFunctionDef;
           if (
             funcWithName.name &&
             funcWithName.name.kind === "id" &&
@@ -812,5 +735,147 @@ export class IFDSTransfer implements Transfer<Set<DataflowFact>> {
     const cfgs: Cfg[] = [];
     this.cu.forEachCFG((cfg) => cfgs.push(cfg));
     return cfgs;
+  }
+
+  /**
+   * Handle slice loading operations in let statements
+   */
+  private handleSliceLoadingLet(
+    outState: Set<DataflowFact>,
+    letStmt: AstStatementLet,
+  ): void {
+    if (
+      letStmt.expression.kind === "method_call" &&
+      letStmt.expression.method &&
+      letStmt.expression.self
+    ) {
+      const methodName = idText(letStmt.expression.method);
+
+      // Check if it's a loading method from a slice
+      if (
+        [
+          "loadAddress",
+          "loadInt",
+          "loadUint",
+          "loadBits",
+          "loadRef",
+          "loadSlice",
+        ].includes(methodName) &&
+        letStmt.name &&
+        letStmt.name.kind === "id"
+      ) {
+        // Find if the slice (self) is tainted
+        const selfId = letStmt.expression.self.id;
+        const isSelfTainted = Array.from(outState).some(
+          (fact) => fact.node === selfId && fact.id.includes(":taint:"),
+        );
+
+        // If the slice is tainted, propagate taint to the variable
+        if (isSelfTainted && letStmt.name.id) {
+          const varTaintFact: DataflowFact = {
+            id: `${letStmt.name.id}:taint:derived`,
+            node: letStmt.name.id,
+            context: undefined,
+          };
+          outState.add(varTaintFact);
+        }
+      }
+    }
+  }
+
+  /**
+   * Handle slice loading operations in assign statements
+   */
+  private handleSliceLoadingAssign(
+    outState: Set<DataflowFact>,
+    assignStmt: AstStatementAssign,
+  ): void {
+    if (
+      assignStmt.expression.kind === "method_call" &&
+      assignStmt.expression.method &&
+      assignStmt.expression.self
+    ) {
+      const methodName = idText(assignStmt.expression.method);
+
+      // Check if it's a loading method from a slice
+      if (
+        [
+          "loadAddress",
+          "loadInt",
+          "loadUint",
+          "loadBits",
+          "loadRef",
+          "loadSlice",
+        ].includes(methodName) &&
+        assignStmt.path &&
+        assignStmt.path.kind === "id"
+      ) {
+        // Find if the slice (self) is tainted
+        const selfId = assignStmt.expression.self.id;
+        const isSelfTainted = Array.from(outState).some(
+          (fact) => fact.node === selfId && fact.id.includes(":taint:"),
+        );
+
+        // If the slice is tainted, propagate taint to the variable
+        if (isSelfTainted && assignStmt.path.id) {
+          const varTaintFact: DataflowFact = {
+            id: `${assignStmt.path.id}:taint:derived`,
+            node: assignStmt.path.id,
+            context: undefined,
+          };
+          outState.add(varTaintFact);
+        }
+      }
+    }
+  }
+
+  // Handle method calls in expressions
+  private handleMethodCallInExpression(
+    outState: Set<DataflowFact>,
+    expr: AstExpression & {
+      method?: AstNode;
+      self?: AstExpression;
+      args?: AstExpression[];
+    },
+  ): void {
+    if (!expr.method || !expr.self) return;
+
+    // Safely get the method name
+    let methodName = "";
+    if (expr.method.kind === "id") {
+      methodName = idText(expr.method);
+    }
+
+    // Check if this is a map operation
+    if (["set", "del", "add", "remove"].includes(methodName)) {
+      // If the self is a field access, mark this as a mutation sink
+      if (expr.self.kind === "field_access") {
+        const sinkFact: DataflowFact = {
+          id: `${expr.id}:taint-sink:mutation`,
+          node: expr.id,
+          context: undefined,
+        };
+        outState.add(sinkFact);
+
+        // Also check if any args are tainted
+        if (expr.args) {
+          for (const arg of expr.args) {
+            // Check if this arg is already tainted
+            const isTainted = Array.from(outState).some(
+              (fact) => fact.node === arg.id && fact.id.includes(":taint:"),
+            );
+            if (isTainted) {
+              // Create a new fact linking the tainted arg to this sink
+              const taintedArgFact: DataflowFact = {
+                id: `${expr.id}:tainted-arg:${arg.id}`,
+                node: expr.id,
+                context: undefined,
+              };
+              outState.add(taintedArgFact);
+            }
+          }
+        }
+      }
+    }
   }
 }

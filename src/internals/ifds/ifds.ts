@@ -1,7 +1,9 @@
-import { AstStore, Cfg, CompilationUnit } from "../ir";
-import { IFDSTransfer } from "./ifdsTransfer";
+import { Cfg, CompilationUnit } from "../ir";
+import { Semilattice } from "../lattice";
 import { SolverResults } from "../solver/results";
 import { WorklistSolver } from "../solver/worklist";
+import { Transfer } from "../transfer";
+import { IFDSTransfer } from "./ifdsTransfer";
 import { AstNode, AstStatement } from "@tact-lang/compiler/dist/grammar/ast";
 
 /**
@@ -18,7 +20,10 @@ export class IFDSLattice {
     return new Set();
   }
   join(a: Set<DataflowFact>, b: Set<DataflowFact>): Set<DataflowFact> {
-    return new Set([...a, ...b]);
+    const result = new Set<DataflowFact>();
+    a.forEach((item) => result.add(item));
+    b.forEach((item) => result.add(item));
+    return result;
   }
   leq(a: Set<DataflowFact>, b: Set<DataflowFact>): boolean {
     return a.size <= b.size;
@@ -26,9 +31,7 @@ export class IFDSLattice {
 }
 
 /**
- * The IFDS algorithm models dataflow facts as a graph reachability problem.
- * Each dataflow fact is a node in the graph, and edges represent how facts flow
- * through the program.
+ * Represents a dataflow fact in IFDS analysis.
  */
 export interface DataflowFact {
   id: string; // Unique identifier for this fact
@@ -84,11 +87,11 @@ export class IFDSResult {
   ): Set<DataflowFact> {
     const result = new Set<DataflowFact>();
     for (const factSet of this.facts.values()) {
-      for (const fact of factSet) {
+      factSet.forEach((fact) => {
         if (predicate(fact)) {
           result.add(fact);
         }
-      }
+      });
     }
     return result;
   }
@@ -100,7 +103,7 @@ export class IFDSResult {
  */
 export class IFDSSolver {
   private readonly cu: CompilationUnit;
-  private readonly ast: AstStore;
+  private readonly ast: CompilationUnit["ast"];
   private readonly callGraph: Map<AstNode["id"], Set<AstNode["id"]>>;
   private readonly summaryEdges: Map<
     string,
@@ -177,8 +180,8 @@ export class IFDSSolver {
     const solver = new WorklistSolver(
       this.cu,
       startCfg,
-      transfer as any, // Type cast for now
-      lattice as any, // Type cast for now
+      transfer as Transfer<Set<DataflowFact>>,
+      lattice as Semilattice<Set<DataflowFact>>,
       "forward",
     );
 
@@ -201,9 +204,9 @@ export class IFDSSolver {
     ifdsResult: IFDSResult,
   ): void {
     // For each basic block, copy the dataflow facts
-    for (const [bbIdx, facts] of solverResults.getStates()) {
+    solverResults.getStates().forEach((facts, bbIdx) => {
       ifdsResult.setFacts(bbIdx, facts);
-    }
+    });
   }
 
   /**
@@ -229,12 +232,12 @@ export class IFDSSolver {
     const result = new Map<AstNode["id"], boolean>();
 
     // Copy all conditions from ctx1
-    for (const [condId, value] of ctx1.conditions) {
+    ctx1.conditions.forEach((value, condId) => {
       result.set(condId, value);
-    }
+    });
 
     // Merge with ctx2, checking for conflicts
-    for (const [condId, value] of ctx2.conditions) {
+    ctx2.conditions.forEach((value, condId) => {
       if (result.has(condId)) {
         const existingValue = result.get(condId);
         if (existingValue !== value) {
@@ -244,7 +247,7 @@ export class IFDSSolver {
       } else {
         result.set(condId, value);
       }
-    }
+    });
     return { conditions: result };
   }
 }
