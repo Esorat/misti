@@ -136,7 +136,6 @@ export class IFDSSolver {
     this.cu.forEachCFG((cfg) => {
       const callerID = cfg.id;
       const callees = new Set<AstNode["id"]>();
-
       cfg.forEachBasicBlock(this.ast, (stmt, _) => {
         // Find function/method calls in the statement and add them to callees
         this.findCallsInStatement(stmt, callees);

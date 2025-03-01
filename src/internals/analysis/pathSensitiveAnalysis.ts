@@ -156,7 +156,7 @@ export class TaintAnalysisResult {
    * - Custom validation functions that check permissions
    */
   private isPermissionCheck(condNode: AstNode, _condValue: boolean): boolean {
-    // This is a simplified implementation, a real one would:
+    // TODO: This is a simplified implementation, a real one would:
     // 1. Check for equality expressions involving sender/owner
     // 2. Check for function calls that might validate permissions
     // 3. Look for custom validation patterns
@@ -341,7 +341,6 @@ export class PathSensitiveTaintAnalysis {
           }
         }
       }
-
       // Add receiver as source for methods
       if ("receiver" in func && func.receiver) {
         const receiver = func.receiver as any;
@@ -353,7 +352,6 @@ export class PathSensitiveTaintAnalysis {
           });
         }
       }
-
       // Add contract fields as sources (without path sensitivity)
       if ("receiver" in func && func.receiver) {
         const contractFields = this.getContractFields(func);

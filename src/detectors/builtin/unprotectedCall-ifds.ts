@@ -84,7 +84,6 @@ export class UnprotectedCallIFDS extends DataflowDetector {
       // First pass: perform path-sensitive IFDS taint analysis
       const ifdsResults = new Map<string, IFDSResult>();
       const solver = new IFDSSolver(cu, true); // Enable path sensitivity
-
       // Run the analysis on each function
       cu.forEachCFG((cfg: Cfg) => {
         try {
@@ -93,11 +92,9 @@ export class UnprotectedCallIFDS extends DataflowDetector {
           if (func && func.loc && func.loc.origin === "stdlib") {
             return; // Skip standard library functions
           }
-
           // Initialize with empty facts and solve
           const initialFacts = new Set<DataflowFact>();
           const result = solver.solve(cfg, initialFacts);
-
           // Store the result for this function
           const functionKey = cfg.id.toString();
           ifdsResults.set(functionKey, result);
@@ -108,7 +105,6 @@ export class UnprotectedCallIFDS extends DataflowDetector {
           );
         }
       });
-
       // Second pass: Analyze the results to find unprotected calls
       for (const [functionKey, result] of ifdsResults) {
         // Get the CFG for this function
@@ -118,23 +114,18 @@ export class UnprotectedCallIFDS extends DataflowDetector {
             cfg = c;
           }
         });
-
         if (!cfg) continue;
-
         // Analyze all statements in this function for unprotected calls
         cfg.forEachBasicBlock(cu.ast, (stmt: AstStatement, bb) => {
           try {
             // Check if this statement is in a protected context
             const isProtected = this.isStatementProtected(stmt, result, bb.idx);
-
             // Skip if this statement is protected
             if (isProtected) {
               return;
             }
-
             // Look for taint sinks in the results for this basic block
             const blockFacts = result.getFacts(bb.idx);
-
             // Check for unprotected calls in the statement
             this.checkForUnprotectedCalls(stmt, blockFacts, warnings);
           } catch (e) {
@@ -151,7 +142,6 @@ export class UnprotectedCallIFDS extends DataflowDetector {
         `Error in ${this.id}: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
-
     return warnings;
   }
 
@@ -165,14 +155,12 @@ export class UnprotectedCallIFDS extends DataflowDetector {
   ): boolean {
     // Get facts for this statement
     const facts = result.getFacts(blockIdx);
-
     // Look for facts that indicate this statement is in a protected context
     for (const fact of facts) {
       // Check if this fact has a :protected-by: marker
       if (fact.id.includes(":protected-by:")) {
         return true;
       }
-
       // Check if this fact has a path context with permission checks
       if (fact.context && fact.context.conditions) {
         for (const [_condId, value] of fact.context.conditions) {
@@ -183,7 +171,6 @@ export class UnprotectedCallIFDS extends DataflowDetector {
         }
       }
     }
-
     // For backward compatibility, also use the heuristic check
     if (this.isInProtectedBlock(stmt)) {
       return true;
